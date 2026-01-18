@@ -27,8 +27,15 @@ irqreturn_t acq_hard_irq(int irq, void *dev_id)
 irqreturn_t acq_thread_irq(int irq, void *dev_id)
 {
     struct acq_device *dev = dev_id;
+    int ret;
 
-    acq_copy_from_mmio(dev);
+    ret = acq_dma_transfer_all(dev);
+    if (ret) {
+        dev_err_ratelimited(&dev->pdev->dev,
+                            "DMA transfer failed: %d\n", ret);
+        return IRQ_HANDLED;
+    }
+
     acq_process_buffers(dev);
     dev_info_ratelimited(&dev->pdev->dev,
                          "IRQ status=0x%08x irq=%lu transfers=%lu\n",
