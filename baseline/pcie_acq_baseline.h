@@ -79,6 +79,7 @@ struct acq_device {
     unsigned long irq_count;
     unsigned long overflow_count;
     unsigned long transfer_count;
+    u32 last_irq_status;
 
 };
 
@@ -90,7 +91,8 @@ void acq_copy_from_mmio(struct acq_device *dev);
 void acq_process_buffers(struct acq_device *dev);
 
 /* 中断处理 */
-irqreturn_t acq_irq_handler(int irq, void *dev_id);
+irqreturn_t acq_hard_irq(int irq, void *dev_id);
+irqreturn_t acq_thread_irq(int irq, void *dev_id);
 
 /* DMA 传输（基线版本：单通道串行） */
 int acq_dma_transfer_channel(struct acq_device *dev, int ch);

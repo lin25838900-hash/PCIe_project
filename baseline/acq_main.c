@@ -67,17 +67,21 @@ static int acq_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
     pci_set_master(pdev);
 
+    //申请中断向量  也就是说申请多个中断类型 最少1个 最多1个
     ret = pci_alloc_irq_vectors(pdev, 1, 1,
                                 PCI_IRQ_MSI | PCI_IRQ_MSIX | PCI_IRQ_LEGACY);
     if (ret < 0) {
         dev_err(&pdev->dev, "Failed to alloc IRQ vectors\n");
         goto err_free_buffers;
     }
-
+    //申请中断号向量
     dev->irq = pci_irq_vector(pdev, 0);
-    ret = request_irq(dev->irq, acq_irq_handler,
-                      (pdev->msi_enabled || pdev->msix_enabled) ? 0 : IRQF_SHARED,
-                      DRIVER_NAME, dev);
+    //建立中断的回调函数绑定 如果设备是支持msi的话 就启用msi 不是的话 就回退到INTx
+    ret = request_threaded_irq(dev->irq, acq_hard_irq, acq_thread_irq,
+                               IRQF_ONESHOT |
+                               ((pdev->msi_enabled || pdev->msix_enabled) ?
+                                0 : IRQF_SHARED),
+                               DRIVER_NAME, dev);
     if (ret) {
         dev_err(&pdev->dev, "Failed to request IRQ %d\n", dev->irq);
         goto err_free_irq_vectors;
