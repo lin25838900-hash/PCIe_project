@@ -1,0 +1,103 @@
+#ifndef PCIE_ACQ_BASELINE_H
+#define PCIE_ACQ_BASELINE_H
+
+#include <linux/module.h>
+#include <linux/pci.h>
+#include <linux/interrupt.h>
+#include <linux/dma-mapping.h>
+#include <linux/slab.h>
+#include <linux/cdev.h>
+#include <linux/fs.h>
+#include <linux/uaccess.h>
+#include <linux/wait.h>
+#include <linux/delay.h>
+#include <linux/io.h>
+#include <linux/bitops.h>
+#include <linux/string.h>
+#include <linux/err.h>
+
+/* 模块/设备命名 */
+#define DRIVER_NAME     "pcie_acq"
+#define DEVICE_NAME     "pcie_acq"
+#define CLASS_NAME      "pcie_acq_class"
+
+/* PCI 设备 ID */
+#define VENDOR_ID       0x1234
+#define DEVICE_ID       0x5678
+
+/* 采集通道与布局 */
+#define NUM_CHANNELS    8
+#define CHANNEL_SIZE    4096
+#define CHANNEL_OFFSET  0x1000
+
+/* 寄存器偏移 */
+#define REG_CTRL        0x0010
+#define REG_STATUS      0x0014
+#define REG_IRQ_STATUS  0x0020
+#define REG_IRQ_MASK    0x0024
+#define REG_IRQ_CLEAR   0x0028
+#define REG_DMA_CTRL    0x0100
+#define REG_DMA_STATUS  0x0104
+#define REG_DMA_ADDR_LO 0x0108
+#define REG_DMA_ADDR_HI 0x010C
+#define REG_DMA_LENGTH  0x0110
+#define REG_CH_BASE     0x1000
+
+/* 控制/中断位 */
+#define CTRL_ENABLE     BIT(0)
+#define IRQ_DATA_READY  BIT(0)
+#define IRQ_DMA_DONE    BIT(1)
+#define IRQ_OVERFLOW    BIT(2)
+
+/* 每通道数据结构 */
+struct acq_channel {
+    void *buffer;
+    dma_addr_t dma_addr;
+    u32 checksum;
+    bool data_ready;
+};
+
+/* 设备私有数据 */
+struct acq_device {
+    struct pci_dev *pdev;
+    void __iomem *regs;
+    resource_size_t bar0_len;
+    int irq;
+
+    struct acq_channel channel[NUM_CHANNELS];
+
+    struct cdev cdev;
+    struct class *class;
+    struct device *device;
+    dev_t devno;
+
+    /* read() 等待数据就绪 */
+    wait_queue_head_t wait_queue;
+    bool data_available;
+
+    /* 统计计数 */
+    unsigned long irq_count;
+    unsigned long overflow_count;
+    unsigned long transfer_count;
+
+};
+
+extern struct acq_device *g_acq_dev;
+
+/* 数据处理 */
+u32 acq_calc_checksum(void *data, size_t len);
+void acq_copy_from_mmio(struct acq_device *dev);
+void acq_process_buffers(struct acq_device *dev);
+
+/* 中断处理 */
+irqreturn_t acq_irq_handler(int irq, void *dev_id);
+
+/* DMA 传输（基线版本：单通道串行） */
+int acq_dma_transfer_channel(struct acq_device *dev, int ch);
+int acq_dma_transfer_all(struct acq_device *dev);
+
+/* 字符设备接口 */
+int acq_chrdev_init(struct acq_device *dev);
+void acq_chrdev_cleanup(struct acq_device *dev);
+
+#endif
