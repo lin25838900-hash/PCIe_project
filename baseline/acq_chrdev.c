@@ -54,7 +54,8 @@ static long acq_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
     switch (cmd) {
     case ACQ_IOC_START:
         iowrite32(CTRL_ENABLE, dev->regs + REG_CTRL);
-        iowrite32(IRQ_DATA_READY | IRQ_OVERFLOW, dev->regs + REG_IRQ_MASK);
+        iowrite32(IRQ_DATA_READY | IRQ_DMA_DONE | IRQ_OVERFLOW,
+                  dev->regs + REG_IRQ_MASK);//注意的是REG_IRQ_MASK这个是启用中断寄存器
         dev_info(&dev->pdev->dev, "Acquisition started\n");
         break;
 
@@ -87,24 +88,25 @@ static const struct file_operations acq_fops = {
 int acq_chrdev_init(struct acq_device *dev)
 {
     int ret;
-
+    //分配设备号
     ret = alloc_chrdev_region(&dev->devno, 0, 1, DEVICE_NAME);
     if (ret)
         return ret;
-
+    //初始化cdev设备
     cdev_init(&dev->cdev, &acq_fops);
     dev->cdev.owner = THIS_MODULE;
+    //添加cdev设备
     ret = cdev_add(&dev->cdev, dev->devno, 1);
     if (ret)
         goto err_unreg;
-
+    //创建设备类
     dev->class = class_create(THIS_MODULE, CLASS_NAME);
     if (IS_ERR(dev->class)) {
         ret = PTR_ERR(dev->class);
         dev->class = NULL;
         goto err_cdev;
     }
-
+    //创建设备节点
     dev->device = device_create(dev->class, NULL, dev->devno, NULL,
                                 DEVICE_NAME);
     if (IS_ERR(dev->device)) {

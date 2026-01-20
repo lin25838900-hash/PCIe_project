@@ -4,13 +4,28 @@ irqreturn_t acq_hard_irq(int irq, void *dev_id)
 {
     struct acq_device *dev = dev_id;
     u32 status;
+    u32 dma_status = 0;
+    unsigned long flags;
 
     status = ioread32(dev->regs + REG_IRQ_STATUS);
 
-    if (!(status & (IRQ_DATA_READY | IRQ_OVERFLOW)))
+    if (!(status & (IRQ_DATA_READY | IRQ_OVERFLOW | IRQ_DMA_DONE)))
         return IRQ_NONE;
 
+    if (status & IRQ_DMA_DONE)
+        dma_status = ioread32(dev->regs + REG_DMA_STATUS);
+
     iowrite32(status, dev->regs + REG_IRQ_CLEAR);
+
+    if (status & IRQ_DMA_DONE) {
+        spin_lock_irqsave(&dev->dma_lock, flags);
+        if (dev->dma_busy) {
+            dev->last_dma_status = dma_status;
+            dev->dma_busy = false;
+            complete(&dev->dma_done);
+        }
+        spin_unlock_irqrestore(&dev->dma_lock, flags);
+    }
 
     if (status & IRQ_OVERFLOW)
         dev->overflow_count++;

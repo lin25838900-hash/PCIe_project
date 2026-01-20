@@ -1,10 +1,21 @@
+#include <linux/barrier.h>
+#include <linux/jiffies.h>
+
 #include "pcie_acq_baseline.h"
+
+#ifndef DMA_ST_DONE
+#define DMA_ST_DONE   BIT(0)
+#endif
+#ifndef DMA_ST_ERR
+#define DMA_ST_ERR    BIT(1)
+#endif
 
 int acq_dma_transfer_channel(struct acq_device *dev, int ch)
 {
     dma_addr_t dma_addr; // 存放DMA可访问的物理地址
-    int timeout = 1000;  // 超时计数（防止无限等待）
+    long tmo;            // 等待中断的超时（jiffies）
     u32 status;          // 存放DMA状态寄存器值
+    unsigned long flags;
 
     // 步骤1：DMA内存映射（最核心！）
     dma_addr = dma_map_single(&dev->pdev->dev,  // PCI设备结构体
@@ -16,6 +27,12 @@ int acq_dma_transfer_channel(struct acq_device *dev, int ch)
         dev_err(&dev->pdev->dev, "DMA mapping failed for channel %d\n", ch);
         return -ENOMEM;
     }
+    //重新初始化完成量是，适用于多次DMA传输（复用同一个完成量）
+    reinit_completion(&dev->dma_done);
+    spin_lock_irqsave(&dev->dma_lock, flags);
+    dev->dma_busy = true;
+    dev->last_dma_status = 0;
+    spin_unlock_irqrestore(&dev->dma_lock, flags);
 
     // 步骤2：配置采集卡的DMA寄存器（告诉硬件传输参数）
     // 写DMA地址低32位到寄存器
@@ -25,26 +42,30 @@ int acq_dma_transfer_channel(struct acq_device *dev, int ch)
     // 写DMA传输长度到寄存器
     iowrite32(CHANNEL_SIZE, dev->regs + REG_DMA_LENGTH);
     // 写控制寄存器：启动DMA传输（0x01是启动指令，硬件相关）
+    wmb();
     iowrite32(0x01, dev->regs + REG_DMA_CTRL);
 
-    // 步骤3：轮询等待DMA传输完成（忙等+超时保护）
-    while (timeout--) {
-        // 读DMA状态寄存器
-        status = ioread32(dev->regs + REG_DMA_STATUS);
-        // 如果状态寄存器的0位为1（传输完成），跳出循环
-        if (status & 0x01)
-            break;
-        // 等待10微秒，再检查（避免CPU空转太狠）
-        udelay(10);
-    }
+    // 步骤3：等待DMA完成中断（睡眠等待）
+    tmo = wait_for_completion_timeout(&dev->dma_done,
+                                      msecs_to_jiffies(1000));
 
     // 步骤4：解除DMA映射（无论成功/失败，都要解映射！）
     dma_unmap_single(&dev->pdev->dev, dma_addr, CHANNEL_SIZE, DMA_FROM_DEVICE);
 
     // 步骤5：检查是否超时
-    if (timeout <= 0) {
+    if (tmo == 0) {
+        spin_lock_irqsave(&dev->dma_lock, flags);
+        dev->dma_busy = false;
+        spin_unlock_irqrestore(&dev->dma_lock, flags);
         dev_err(&dev->pdev->dev, "DMA timeout for channel %d\n", ch);
         return -ETIMEDOUT;
+    }
+
+    status = dev->last_dma_status;
+    if (status & DMA_ST_ERR) {
+        dev_err(&dev->pdev->dev, "DMA error on channel %d, status=0x%x\n",
+                ch, status);
+        return -EIO;
     }
 
     // 传输成功

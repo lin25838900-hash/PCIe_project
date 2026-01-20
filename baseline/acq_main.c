@@ -25,6 +25,10 @@ static int acq_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     g_acq_dev = dev;
 
     init_waitqueue_head(&dev->wait_queue);//probe阶段初始化内核等待队列 实现内核托管机制
+    spin_lock_init(&dev->dma_lock);
+    init_completion(&dev->dma_done);
+    dev->dma_busy = false;
+    dev->last_dma_status = 0;
     
     //上述是初始化自定义驱动结构，下面就是初始化pci子系统
     ret = pci_enable_device(pdev);//打开pci设备，允许访问他的bar之类的资源
@@ -64,7 +68,7 @@ static int acq_probe(struct pci_dev *pdev, const struct pci_device_id *id)
             goto err_free_buffers;
         }
     }
-
+    //开启设备的bus master的能力，让PCI设备可以主动发起总线事务
     pci_set_master(pdev);
 
     //申请中断向量  也就是说申请多个中断类型 最少1个 最多1个
@@ -78,7 +82,6 @@ static int acq_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     dev->irq = pci_irq_vector(pdev, 0);
     //建立中断的回调函数绑定 如果设备是支持msi的话 就启用msi 不是的话 就回退到INTx
     ret = request_threaded_irq(dev->irq, acq_hard_irq, acq_thread_irq,
-                               IRQF_ONESHOT |
                                ((pdev->msi_enabled || pdev->msix_enabled) ?
                                 0 : IRQF_SHARED),
                                DRIVER_NAME, dev);

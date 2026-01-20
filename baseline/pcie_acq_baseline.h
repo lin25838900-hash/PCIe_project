@@ -15,6 +15,8 @@
 #include <linux/bitops.h>
 #include <linux/string.h>
 #include <linux/err.h>
+#include <linux/completion.h>
+#include <linux/spinlock.h>
 
 /* 模块/设备命名 */
 #define DRIVER_NAME     "pcie_acq"
@@ -74,6 +76,12 @@ struct acq_device {
     /* read() 等待数据就绪 */
     wait_queue_head_t wait_queue;
     bool data_available;
+
+    /* DMA 完成等待 */
+    struct completion dma_done;
+    spinlock_t dma_lock;
+    bool dma_busy;
+    u32 last_dma_status;
 
     /* 统计计数 */
     unsigned long irq_count;
