@@ -1,3 +1,6 @@
+//已经被dma优化
+
+
 #include "pcie_acq_baseline.h"
 
 u32 acq_calc_checksum(void *data, size_t len)

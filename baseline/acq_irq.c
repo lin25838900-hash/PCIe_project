@@ -22,7 +22,7 @@ irqreturn_t acq_hard_irq(int irq, void *dev_id)
         if (dev->dma_busy) {
             dev->last_dma_status = dma_status;
             dev->dma_busy = false;
-            complete(&dev->dma_done);
+            complete(&dev->dma_done);//在这里唤醒dma的等待队列 执行步骤是 先dma进行操作 配置dma寄存器，打开dma的传输 然后进入睡眠 然后当dma数据写完之后 触发中断 然后判断是dma数据完成的中断 然后唤醒  对标志位进行判断即可
         }
         spin_unlock_irqrestore(&dev->dma_lock, flags);
     }

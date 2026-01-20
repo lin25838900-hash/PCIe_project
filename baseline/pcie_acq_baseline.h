@@ -17,6 +17,7 @@
 #include <linux/err.h>
 #include <linux/completion.h>
 #include <linux/spinlock.h>
+#include <linux/scatterlist.h>
 
 /* 模块/设备命名 */
 #define DRIVER_NAME     "pcie_acq"
@@ -43,6 +44,9 @@
 #define REG_DMA_ADDR_LO 0x0108
 #define REG_DMA_ADDR_HI 0x010C
 #define REG_DMA_LENGTH  0x0110
+#define REG_DMA_SG_ADDR_LO 0x0114
+#define REG_DMA_SG_ADDR_HI 0x0118
+#define REG_DMA_SG_COUNT 0x011C
 #define REG_CH_BASE     0x1000
 
 /* 控制/中断位 */
@@ -50,6 +54,14 @@
 #define IRQ_DATA_READY  BIT(0)
 #define IRQ_DMA_DONE    BIT(1)
 #define IRQ_OVERFLOW    BIT(2)
+#define DMA_CTRL_START  BIT(0)
+#define DMA_CTRL_SG_MODE BIT(1)
+
+struct acq_sg_desc {
+    u64 addr;
+    u32 len;
+    u32 rsvd;
+};
 
 /* 每通道数据结构 */
 struct acq_channel {
@@ -67,6 +79,10 @@ struct acq_device {
     int irq;
 
     struct acq_channel channel[NUM_CHANNELS];
+    struct scatterlist sg[NUM_CHANNELS];
+    struct acq_sg_desc *sg_desc;
+    dma_addr_t sg_desc_dma;
+    u32 sg_desc_count;
 
     struct cdev cdev;
     struct class *class;
@@ -102,9 +118,10 @@ void acq_process_buffers(struct acq_device *dev);
 irqreturn_t acq_hard_irq(int irq, void *dev_id);
 irqreturn_t acq_thread_irq(int irq, void *dev_id);
 
-/* DMA 传输（基线版本：单通道串行） */
-int acq_dma_transfer_channel(struct acq_device *dev, int ch);
+/* DMA 传输（SG 批量模式） */
 int acq_dma_transfer_all(struct acq_device *dev);
+int acq_dma_setup_sg(struct acq_device *dev);
+void acq_dma_cleanup_sg(struct acq_device *dev);
 
 /* 字符设备接口 */
 int acq_chrdev_init(struct acq_device *dev);

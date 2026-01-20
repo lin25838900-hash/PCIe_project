@@ -59,14 +59,22 @@ static int acq_probe(struct pci_dev *pdev, const struct pci_device_id *id)
             goto err_unmap;
         }
     }
-    //初始化缓存池
+    //初始化缓存池（使用一致性 DMA 内存，避免每次 map/unmap）
     for (i = 0; i < NUM_CHANNELS; i++) {
-        dev->channel[i].buffer = kmalloc(CHANNEL_SIZE, GFP_KERNEL);
+        dev->channel[i].buffer = dma_alloc_coherent(&pdev->dev,
+                                                    CHANNEL_SIZE,
+                                                    &dev->channel[i].dma_addr,
+                                                    GFP_KERNEL);
         if (!dev->channel[i].buffer) {
             dev_err(&pdev->dev, "Failed to alloc buffer for channel %d\n", i);
             ret = -ENOMEM;
             goto err_free_buffers;
         }
+    }
+    ret = acq_dma_setup_sg(dev);
+    if (ret) {
+        dev_err(&pdev->dev, "Failed to setup SG DMA: %d\n", ret);
+        goto err_free_buffers;
     }
     //开启设备的bus master的能力，让PCI设备可以主动发起总线事务
     pci_set_master(pdev);
@@ -109,8 +117,16 @@ err_free_irq:
 err_free_irq_vectors:
     pci_free_irq_vectors(pdev);
 err_free_buffers:
-    for (i = 0; i < NUM_CHANNELS; i++)
-        kfree(dev->channel[i].buffer);
+    acq_dma_cleanup_sg(dev);
+    for (i = 0; i < NUM_CHANNELS; i++) {
+        if (dev->channel[i].buffer) {
+            dma_free_coherent(&pdev->dev,
+                              CHANNEL_SIZE,
+                              dev->channel[i].buffer,
+                              dev->channel[i].dma_addr);
+            dev->channel[i].buffer = NULL;
+        }
+    }
 err_unmap:
     pci_iounmap(pdev, dev->regs);
 err_release:
@@ -139,8 +155,12 @@ static void acq_remove(struct pci_dev *pdev)
     free_irq(dev->irq, dev);
     pci_free_irq_vectors(pdev);
 
+    acq_dma_cleanup_sg(dev);
     for (i = 0; i < NUM_CHANNELS; i++)
-        kfree(dev->channel[i].buffer);
+        dma_free_coherent(&pdev->dev,
+                          CHANNEL_SIZE,
+                          dev->channel[i].buffer,
+                          dev->channel[i].dma_addr);
 
     pci_iounmap(pdev, dev->regs);
     pci_release_regions(pdev);

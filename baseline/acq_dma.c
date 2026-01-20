@@ -10,77 +10,106 @@
 #define DMA_ST_ERR    BIT(1)
 #endif
 
-int acq_dma_transfer_channel(struct acq_device *dev, int ch)
+int acq_dma_setup_sg(struct acq_device *dev)
 {
-    dma_addr_t dma_addr; // 存放DMA可访问的物理地址
-    long tmo;            // 等待中断的超时（jiffies）
-    u32 status;          // 存放DMA状态寄存器值
-    unsigned long flags;
+    int i;
 
-    // 步骤1：DMA内存映射（最核心！）
-    dma_addr = dma_map_single(&dev->pdev->dev,  // PCI设备结构体
-                              dev->channel[ch].buffer,  // 内核缓冲区（虚拟地址）
-                              CHANNEL_SIZE,  // 传输长度
-                              DMA_FROM_DEVICE); // 传输方向：外设→内存
-    // 检查映射是否失败
-    if (dma_mapping_error(&dev->pdev->dev, dma_addr)) {
-        dev_err(&dev->pdev->dev, "DMA mapping failed for channel %d\n", ch);
+    sg_init_table(dev->sg, NUM_CHANNELS);
+    dev->sg_desc = NULL;
+    dev->sg_desc_dma = 0;
+    dev->sg_desc_count = 0;
+
+    for (i = 0; i < NUM_CHANNELS; i++) {
+        if (!dev->channel[i].buffer)
+            return -EINVAL;
+        sg_set_buf(&dev->sg[i], dev->channel[i].buffer, CHANNEL_SIZE);
+        sg_dma_address(&dev->sg[i]) = dev->channel[i].dma_addr;
+        sg_dma_len(&dev->sg[i]) = CHANNEL_SIZE;
+    }
+
+    dev->sg_desc_count = NUM_CHANNELS;
+    dev->sg_desc = dma_alloc_coherent(&dev->pdev->dev,
+                                      sizeof(*dev->sg_desc) *
+                                      dev->sg_desc_count,
+                                      &dev->sg_desc_dma,
+                                      GFP_KERNEL);
+    if (!dev->sg_desc) {
+        dev->sg_desc_count = 0;
+        dev->sg_desc_dma = 0;
         return -ENOMEM;
     }
-    //重新初始化完成量是，适用于多次DMA传输（复用同一个完成量）
+
+    for (i = 0; i < dev->sg_desc_count; i++) {
+        dev->sg_desc[i].addr = sg_dma_address(&dev->sg[i]);
+        dev->sg_desc[i].len = sg_dma_len(&dev->sg[i]);
+        dev->sg_desc[i].rsvd = 0;
+    }
+
+    return 0;
+}
+
+void acq_dma_cleanup_sg(struct acq_device *dev)
+{
+    if (!dev->sg_desc)
+        return;
+
+    dma_free_coherent(&dev->pdev->dev,
+                      sizeof(*dev->sg_desc) * dev->sg_desc_count,
+                      dev->sg_desc, dev->sg_desc_dma);
+    dev->sg_desc = NULL;
+    dev->sg_desc_dma = 0;
+    dev->sg_desc_count = 0;
+}
+
+static int acq_dma_transfer_sg(struct acq_device *dev)
+{
+    dma_addr_t sg_base;
+    long tmo;
+    u32 status;
+    unsigned long flags;
+
+    if (!dev->sg_desc || dev->sg_desc_count == 0)
+        return -EINVAL;
+
+    sg_base = dev->sg_desc_dma;
+
     reinit_completion(&dev->dma_done);
     spin_lock_irqsave(&dev->dma_lock, flags);
     dev->dma_busy = true;
     dev->last_dma_status = 0;
     spin_unlock_irqrestore(&dev->dma_lock, flags);
 
-    // 步骤2：配置采集卡的DMA寄存器（告诉硬件传输参数）
-    // 写DMA地址低32位到寄存器
-    iowrite32(lower_32_bits(dma_addr), dev->regs + REG_DMA_ADDR_LO);
-    // 写DMA地址高32位到寄存器（支持64位系统）
-    iowrite32(upper_32_bits(dma_addr), dev->regs + REG_DMA_ADDR_HI);
-    // 写DMA传输长度到寄存器
-    iowrite32(CHANNEL_SIZE, dev->regs + REG_DMA_LENGTH);
-    // 写控制寄存器：启动DMA传输（0x01是启动指令，硬件相关）
+    iowrite32(lower_32_bits(sg_base), dev->regs + REG_DMA_SG_ADDR_LO);
+    iowrite32(upper_32_bits(sg_base), dev->regs + REG_DMA_SG_ADDR_HI);
+    iowrite32(dev->sg_desc_count, dev->regs + REG_DMA_SG_COUNT);
     wmb();
-    iowrite32(0x01, dev->regs + REG_DMA_CTRL);
+    iowrite32(DMA_CTRL_START | DMA_CTRL_SG_MODE, dev->regs + REG_DMA_CTRL);
 
-    // 步骤3：等待DMA完成中断（睡眠等待）
     tmo = wait_for_completion_timeout(&dev->dma_done,
                                       msecs_to_jiffies(1000));
 
-    // 步骤4：解除DMA映射（无论成功/失败，都要解映射！）
-    dma_unmap_single(&dev->pdev->dev, dma_addr, CHANNEL_SIZE, DMA_FROM_DEVICE);
-
-    // 步骤5：检查是否超时
     if (tmo == 0) {
         spin_lock_irqsave(&dev->dma_lock, flags);
         dev->dma_busy = false;
         spin_unlock_irqrestore(&dev->dma_lock, flags);
-        dev_err(&dev->pdev->dev, "DMA timeout for channel %d\n", ch);
+        dev_err(&dev->pdev->dev, "SG DMA timeout\n");
         return -ETIMEDOUT;
     }
 
     status = dev->last_dma_status;
     if (status & DMA_ST_ERR) {
-        dev_err(&dev->pdev->dev, "DMA error on channel %d, status=0x%x\n",
-                ch, status);
+        dev_err(&dev->pdev->dev, "SG DMA error, status=0x%x\n", status);
         return -EIO;
     }
 
-    // 传输成功
     return 0;
 }
 
+
 int acq_dma_transfer_all(struct acq_device *dev)
 {
-    int i, ret;
+    if (!dev->sg_desc_count)
+        return -EINVAL;
 
-    for (i = 0; i < NUM_CHANNELS; i++) {
-        ret = acq_dma_transfer_channel(dev, i);
-        if (ret)
-            return ret;
-    }
-
-    return 0;
+    return acq_dma_transfer_sg(dev);
 }
